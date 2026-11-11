@@ -101,7 +101,7 @@
     upload: [58, 100],
   };
 
-  const state = { running: false, controller: null };
+  const state = { running: false, controller: null, base: '' };
 
   /* --------------------------------------------------------- utilities */
 
@@ -132,6 +132,10 @@
   function mbps(bytes, ms) { return ms > 0 ? (bytes * 8) / (ms / 1000) / 1e6 : 0; }
 
   function cacheBuster() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+  // Workers publish their own host port when they can, which takes this app out
+  // of the data path; an empty base means "go through the same-origin proxy".
+  function speedUrl(path) { return `${state.base}${path}`; }
 
   /* ---------------------------------------------------------- progress */
 
@@ -235,7 +239,7 @@
 
   async function probe(signal) {
     const started = performance.now();
-    const res = await fetch(`/__speed/ping?r=${cacheBuster()}`, { cache: 'no-store', signal });
+    const res = await fetch(speedUrl(`/__speed/ping?r=${cacheBuster()}`), { cache: 'no-store', signal });
     if (!res.ok) throw new Error(`ping failed with ${res.status}`);
     await res.arrayBuffer();
     return performance.now() - started;
@@ -320,7 +324,7 @@
   async function downloadStream(signal, window, delayMs) {
     if (delayMs) await sleep(delayMs, signal).catch(() => {});
     while (!signal.aborted) {
-      const res = await fetch(`/__speed/down?bytes=${CFG.downloadRequestBytes}&r=${cacheBuster()}`, { cache: 'no-store', signal });
+      const res = await fetch(speedUrl(`/__speed/down?bytes=${CFG.downloadRequestBytes}&r=${cacheBuster()}`), { cache: 'no-store', signal });
       if (!res.ok) throw new Error(`download failed with ${res.status}`);
       if (!res.body) {
         const buffer = await res.arrayBuffer();
@@ -400,13 +404,14 @@
     const probeBytes = 64 * 1024;
     try {
       const body = streamBody(new Uint8Array(probeBytes), probeBytes, probeBytes, () => {});
-      const res = await fetch(`/__speed/up?probe=1&r=${cacheBuster()}`, {
+      const res = await fetch(speedUrl(`/__speed/up?probe=1&r=${cacheBuster()}`), {
         method: 'POST',
         body,
         duplex: 'half',
         cache: 'no-store',
         signal,
-        headers: { 'Content-Type': 'application/octet-stream' },
+        // A simple content type keeps this a CORS simple request.
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
       });
       await res.arrayBuffer();
       streamingUploads = res.ok;
@@ -427,7 +432,7 @@
     if (delayMs) await sleep(delayMs, signal).catch(() => {});
 
     while (!signal.aborted) {
-      const url = `/__speed/up?r=${cacheBuster()}`;
+      const url = speedUrl(`/__speed/up?r=${cacheBuster()}`);
 
       if (streaming) {
         const body = streamBody(source, CFG.uploadRequestBytes, CFG.uploadChunkBytes, (size) => { window.bytes += size; });
@@ -437,7 +442,7 @@
           duplex: 'half',
           cache: 'no-store',
           signal,
-          headers: { 'Content-Type': 'application/octet-stream' },
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         });
         if (!res.ok) throw new Error(`upload failed with ${res.status}`);
         await res.arrayBuffer();
@@ -450,7 +455,7 @@
         body: source,
         cache: 'no-store',
         signal,
-        headers: { 'Content-Type': 'application/octet-stream' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
       });
       if (!res.ok) throw new Error(`upload failed with ${res.status}`);
       await res.arrayBuffer();
@@ -480,6 +485,35 @@
 
   /* ------------------------------------------------------------ the run */
 
+  /**
+   * When the worker published a host port this page can reach, measure straight
+   * against it: one hop instead of two and nothing buffering in the middle.
+   * Falls back to the same-origin proxy when the probe fails.
+   */
+  async function pickOrigin(meta, signal) {
+    const origin = meta && meta.workerOrigin;
+    if (!origin || location.protocol !== 'http:' || !/^http:\/\/[^/]+$/.test(origin)) return '';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const relayAbort = () => controller.abort();
+    signal.addEventListener('abort', relayAbort, { once: true });
+    try {
+      const ping = await fetch(`${origin}/__speed/ping?r=${cacheBuster()}`, { cache: 'no-store', signal: controller.signal });
+      if (!ping.ok) return '';
+      await ping.arrayBuffer();
+      const sample = await fetch(`${origin}/__speed/down?bytes=65536&r=${cacheBuster()}`, { cache: 'no-store', signal: controller.signal });
+      if (!sample.ok) return '';
+      await sample.arrayBuffer();
+      return origin;
+    } catch (err) {
+      if (window.console) console.warn('[speedtest] direct worker unreachable, measuring through the proxy', err);
+      return '';
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', relayAbort);
+    }
+  }
+
   function resetMetrics() {
     setMetric(el.down, null);
     setMetric(el.up, null);
@@ -497,6 +531,7 @@
     const signal = state.controller.signal;
 
     if (el.gate) el.gate.classList.add('hidden');
+    state.base = '';
     resetMetrics();
     setStatus('Connecting to the test worker');
     if (el.play) el.play.disabled = true;
@@ -506,7 +541,9 @@
 
     try {
       phaseProgress('connect', 0.2);
-      renderMeta(await fetchMeta(signal));
+      const meta = await fetchMeta(signal);
+      renderMeta(meta);
+      state.base = await pickOrigin(meta, signal);
       phaseProgress('connect', 1);
 
       setStatus('Measuring latency');
