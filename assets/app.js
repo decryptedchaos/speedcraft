@@ -89,13 +89,28 @@
     // Four transfer sizes, smallest first: the small stages are dominated by
     // connection setup and latency, the large ones by sustained throughput.
     stages: [10 * 1024, 1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024],
-    streams: 4,
-    uploadBuffer: 8 * 1024 * 1024,
+    uploadBuffer: 4 * 1024 * 1024,
     uploadChunk: 256 * 1024,
     loadedProbeMs: 150,
-    // Skip a stage when the previous one projects to longer than this.
-    maxStageMs: 30000,
   };
+
+  /** Parallel connections per stage: small transfers are one shot, the large
+   *  ones need several streams before the pipe is actually full. */
+  function streamsFor(size) {
+    if (size >= 64 * 1024 * 1024) return 6;
+    if (size >= 4 * 1024 * 1024) return 4;
+    if (size >= 512 * 1024) return 2;
+    return 1;
+  }
+
+  /** Per-stage deadline. A stage that runs out of time is still reported: the
+   *  bytes it moved over the elapsed time are a real measurement. The largest
+   *  stage must never be skipped, because that is where the peak shows. */
+  function budgetFor(size) {
+    if (size >= 64 * 1024 * 1024) return 75000;
+    if (size >= 4 * 1024 * 1024) return 30000;
+    return 15000;
+  }
 
   const PHASE = {
     connect: [0, 2],
@@ -223,14 +238,11 @@
       return;
     }
     body.innerHTML = stages.map((stage) => {
-      if (stage.skipped) {
-        return `<tr><td class="grade"><span class="stage-dot grade-1" style="opacity:.3"></span></td>`
-          + `<td>${formatBytes(stage.size)}</td><td>skipped</td><td>-</td></tr>`;
-      }
       const grade = gradeFor(stage.mbps, DOWNLOAD_SCALE) || 1;
       const loaded = stage.loaded === null || stage.loaded === undefined ? '-' : `${stage.loaded.toFixed(1)} ms`;
+      const note = stage.partial ? ' <span class="stage-note">partial</span>' : '';
       return `<tr><td class="grade"><span class="stage-dot grade-${grade}"></span></td>`
-        + `<td>${formatBytes(stage.size)}</td><td>${stage.mbps.toFixed(1)} Mbps</td><td>${loaded}</td></tr>`;
+        + `<td>${formatBytes(stage.size)}</td><td>${stage.mbps.toFixed(1)} Mbps${note}</td><td>${loaded}</td></tr>`;
     }).join('');
   }
 
@@ -494,12 +506,17 @@
   }
 
   async function runStage(signal, direction, size, streaming, onProgress) {
-    const streams = Math.max(1, Math.min(CFG.streams, Math.ceil(size / (2 * 1024 * 1024))));
+    const streams = streamsFor(size);
     const slice = Math.floor(size / streams);
     const loaded = [];
     let bytes = 0;
 
-    const stopProbes = watchLoadedLatency(signal, loaded);
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(), budgetFor(size));
+    const relayAbort = () => budget.abort();
+    signal.addEventListener('abort', relayAbort, { once: true });
+
+    const stopProbes = watchLoadedLatency(budget.signal, loaded);
     const started = performance.now();
     const tasks = [];
     for (let index = 0; index < streams; index += 1) {
@@ -509,55 +526,54 @@
         if (onProgress) onProgress(Math.min(1, bytes / size));
       };
       tasks.push(direction === 'down'
-        ? downloadAmount(signal, amount, onBytes)
-        : uploadAmount(signal, amount, onBytes, streaming));
+        ? downloadAmount(budget.signal, amount, onBytes)
+        : uploadAmount(budget.signal, amount, onBytes, streaming));
     }
 
+    let partial = false;
     try {
       await Promise.all(tasks);
+    } catch (err) {
+      if (signal.aborted) throw abortError();
+      if (!budget.signal.aborted) throw err;
+      partial = true;
     } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', relayAbort);
       stopProbes();
     }
 
     const elapsed = performance.now() - started;
+    if (bytes === 0) {
+      throw new Error(`the ${formatBytes(size)} stage moved no data`);
+    }
     return {
       size,
       bytes,
       ms: elapsed,
-      mbps: elapsed > 0 ? (bytes * 8) / (elapsed / 1000) / 1e6 : 0,
+      mbps: (bytes * 8) / (Math.max(elapsed, 1) / 1000) / 1e6,
       loaded: median(loaded),
+      partial,
     };
   }
 
   async function runStages(signal, direction, streaming, onProgress, onStage) {
-    let previous = null;
     for (let index = 0; index < CFG.stages.length; index += 1) {
       const size = CFG.stages[index];
       const base = index / CFG.stages.length;
       const span = 1 / CFG.stages.length;
-
-      if (previous && previous.mbps > 0) {
-        const projected = (size * 8) / (previous.mbps * 1e6);
-        if (projected > CFG.maxStageMs / 1000) {
-          onStage({ size, skipped: true });
-          onProgress(base + span);
-          continue;
-        }
-      }
-
-      setStatus(`${direction === 'down' ? 'Download' : 'Upload'} ${formatBytes(size)}`);
+      const label = direction === 'down' ? 'Download' : 'Upload';
+      setStatus(`${label} ${formatBytes(size)}`);
       const result = await runStage(signal, direction, size, streaming, (fraction) => onProgress(base + span * fraction));
       onStage(result);
-      previous = result;
       onProgress(base + span);
     }
   }
 
-  function lastStage(stages) {
-    for (let index = stages.length - 1; index >= 0; index -= 1) {
-      if (!stages[index].skipped) return stages[index];
-    }
-    return null;
+  /** Headline comes from the fastest stage: the small ones are latency bound and
+   *  understate the link, so the peak is what the connection can actually do. */
+  function bestStage(stages) {
+    return stages.reduce((best, stage) => (!best || stage.mbps > best.mbps ? stage : best), null);
   }
 
   /* ------------------------------------------------------------ the run */
@@ -655,11 +671,11 @@
         (fraction) => phaseProgress('download', fraction),
         (stage) => {
           downloadStages.push(stage);
-          const best = lastStage(downloadStages);
+          const best = bestStage(downloadStages);
           metrics.down = best ? best.mbps : metrics.down;
           metrics.loadedDown = best ? best.loaded : metrics.loadedDown;
           setMetric(el.down, metrics.down, 'Mbps');
-          if (el.down) el.down.title = `sustained rate of the largest completed transfer`;
+          if (el.down) el.down.title = 'best measured stage, with loaded latency during it';
           renderStages(el.stageDown, downloadStages, 'Download not measured yet');
           renderScale(metrics);
         },
@@ -673,11 +689,11 @@
         (fraction) => phaseProgress('upload', fraction),
         (stage) => {
           uploadStages.push(stage);
-          const best = lastStage(uploadStages);
+          const best = bestStage(uploadStages);
           metrics.up = best ? best.mbps : metrics.up;
           metrics.loadedUp = best ? best.loaded : metrics.loadedUp;
           setMetric(el.up, metrics.up, 'Mbps');
-          if (el.up) el.up.title = `sustained rate of the largest completed transfer`;
+          if (el.up) el.up.title = 'best measured stage, with loaded latency during it';
           renderStages(el.stageUp, uploadStages, 'Upload not measured yet');
           renderScale(metrics);
         },

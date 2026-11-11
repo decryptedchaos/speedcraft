@@ -53,7 +53,7 @@ curl -s localhost:3390/healthz
 
 ### Rebuilding after a code change
 
-`docker-compose.yml` names the image explicitly (`speedtest:rust3`) and workers
+`docker-compose.yml` names the image explicitly (`speedtest:rust4`) and workers
 are created from that same tag, so a deploy tool that only runs `up -d` cannot
 silently reuse the image a previous deploy left behind. Bump the tag in both
 places when the code changes, or deploy with `--build`. `/healthz` answers
