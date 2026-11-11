@@ -1,8 +1,7 @@
-# local configuration and secrets
-.env
-.env.*
-!.env.git
-!.env.example
+# local overrides and secrets (.env holds public defaults only)
+.env.local
+.env.*.local
+.env.backup
 
 # generated build output
 app/dist/

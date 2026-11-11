@@ -1,4 +1,4 @@
-# Linux deploy target: keep line endings stable so .env.git values never pick
+# Linux deploy target: keep line endings stable so .env values never pick
 # up a stray carriage return and Dockerfiles stay readable in the build log.
 * text=auto eol=lf
 *.png binary

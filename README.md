@@ -18,7 +18,7 @@ one image, and worker containers are created from it on demand.
 
 ```
 docker-compose.yml     Compose project (deploy root)
-.env.git               Committed defaults, merged into the project .env
+.env                   Committed defaults, read by Arcane and by compose
 app/                   Application source, Dockerfile and site templates
 app/server.mjs         Static site, /healthz and the /__speed proxy
 app/orchestrator.mjs   Worker pool: spawn, sticky sessions, idle reaping
@@ -32,8 +32,8 @@ app/templates/         Page source; build.mjs generates app/dist/
 1. Projects → **Create Project** → **From Git Repo**, direction **Pull**.
 2. Repository `ssh://git@192.168.1.88:2222/decryptedchaos/speed-test.git` (the Git host listens on port 2222), branch `main`.
 3. Compose file path: `docker-compose.yml` (repository root).
-4. Sync. Arcane merges `.env.git` into the project `.env`; adjust values there
-   (for example `WORKER_LOCATION`), save, and deploy.
+4. Sync. The repository's `.env` is the project env file; adjust values in
+   Arcane's env editor (for example `WORKER_LOCATION`), save, and deploy.
 
 The app needs the Docker socket to create its workers; the mount is already in
 the Compose file. Give the host a moment to start — workers are only created on
@@ -42,7 +42,7 @@ first use, so `/healthz` reporting `"workers": 0` right after deploy is normal.
 ## Deploy without Arcane
 
 ```bash
-cp .env.git .env          # optional: override defaults
+# .env already holds the defaults; edit it if you need different values
 docker compose up -d --build
 curl -s localhost:3000/healthz
 ```
@@ -74,8 +74,8 @@ The app proxies `/__speed/*` to the worker assigned to the browser session
 
 ## Configuration
 
-Set these in `.env` (or the project env in Arcane). Defaults are inline in
-`docker-compose.yml`.
+Set these in `.env` (the table below matches its contents). Every key is
+optional: `docker-compose.yml` falls back to the same value inline.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -92,10 +92,12 @@ Set these in `.env` (or the project env in Arcane). Defaults are inline in
 
 ## Security note
 
-Mounting `/var/run/docker.sock` gives the container root-equivalent control of
-the host daemon, and the app has no authentication. Run it on a host you trust
-and keep the published port private (set `APP_BIND=127.0.0.1` if the machine is
-not dedicated to this tool).
+`.env` is committed and must never hold a secret — put those in Arcane's
+environment secrets or a local `.env.local` instead. Mounting
+`/var/run/docker.sock` gives the container root-equivalent control of the host
+daemon, and the app has no authentication. Run it on a host you trust and keep
+the published port private (set `APP_BIND=127.0.0.1` if the machine is not
+dedicated to this tool).
 
 Worker containers are hardened: read-only root filesystem, all capabilities
 dropped, `no-new-privileges`, 256 MB memory, one CPU, 64 PID limit, and the

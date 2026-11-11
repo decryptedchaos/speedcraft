@@ -1,5 +1,5 @@
 # Private speed test. Arcane (or plain `docker compose up -d --build`) uses this
-# file from the repository root; values come from .env, defaults live in .env.git.
+# file from the repository root; values come from the committed .env.
 services:
   speedtest:
     build:
