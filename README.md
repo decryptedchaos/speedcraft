@@ -53,10 +53,10 @@ curl -s localhost:3390/healthz
 
 ### Rebuilding after a code change
 
-`docker-compose.yml` names the image explicitly (`speedtest:rust4`) and workers
-are created from that same tag, so a deploy tool that only runs `up -d` cannot
-silently reuse the image a previous deploy left behind. Bump the tag in both
-places when the code changes, or deploy with `--build`. `/healthz` answers
+`docker-compose.yml` sets `pull_policy: build`, so every `docker compose up` —
+including a redeploy triggered by a git push — rebuilds the image from the synced
+sources instead of reusing whatever the previous deploy left behind. The tag can
+stay fixed at `speedtest:rust`; workers are created from it. `/healthz` answers
 `"runtime":"rust"` (with a `version`) once the new binary is serving — if that
 field is missing, the old image is still running.
 
