@@ -365,11 +365,24 @@
     return step * power;
   }
 
+  let heroFrame = null;
+
+  function scheduleHeroDraw() {
+    if (heroFrame) return;
+    const frame = window.requestAnimationFrame || ((callback) => setTimeout(callback, 16));
+    heroFrame = frame(() => {
+      heroFrame = null;
+      drawHero('down');
+      drawHero('up');
+    });
+  }
+
   function pushHeroSample(direction, mbps) {
     const chart = charts[direction];
     if (!chart || !Number.isFinite(mbps)) return;
     chart.series.push(mbps);
     if (chart.series.length > 600) chart.series.splice(0, chart.series.length - 600);
+    scheduleHeroDraw();
   }
 
   /** The live line: grows left to right, fills underneath and keeps the 90th
@@ -385,7 +398,10 @@
     const top = 12;
     const bottom = height - 12;
     const innerHeight = Math.max(1, bottom - top);
-    const max = niceMax(Math.max.apply(null, series.concat([1])) * 1.15);
+    // Scale to p95, not the peak: one spike would otherwise flatten the curve
+    // into the baseline for the rest of the run.
+    const peak = percentile(series, 95) || Math.max.apply(null, series);
+    const max = niceMax(Math.max(peak * 1.25, 1));
     const xAt = (index) => (index / Math.max(1, HERO_SLOTS - 1)) * width;
     const yAt = (value) => bottom - Math.min(1, Math.max(0, value) / max) * innerHeight;
 
@@ -472,7 +488,8 @@
     const top = 8;
     const bottom = height - 12;
     const innerHeight = Math.max(1, bottom - top);
-    const axisMax = niceMax(Math.max.apply(null, numeric.concat([1])) * 1.4);
+    const peak = percentile(numeric, 95) || Math.max.apply(null, numeric.concat([1]));
+    const axisMax = niceMax(Math.max(peak * 1.3, 1));
     const xAt = (value) => (Math.log10(Math.max(1, Math.min(axisMax, value))) / Math.log10(axisMax)) * width;
 
     ctx.strokeStyle = line;
@@ -908,23 +925,24 @@
 
     const stopProbes = watchLoadedLatency(budget.signal, loaded);
     const started = performance.now();
-    const sampler = setInterval(() => {
-      const now = performance.now();
-      const span = Math.max(now - sampledAt, 1);
-      const moved = bytes - sampledBytes;
-      sampledBytes = bytes;
-      sampledAt = now;
-      const mbps = (moved * 8) / (span / 1000) / 1e6;
-      if (mbps > 0) {
-        samples.push(mbps);
-        pushHeroSample(direction, mbps);
-      }
-    }, 140);
     const tasks = [];
     for (let index = 0; index < streams; index += 1) {
       const amount = index === streams - 1 ? size - slice * (streams - 1) : slice;
       const onBytes = (count) => {
         bytes += count;
+        // Sample from the data itself: a timer gets throttled in a background
+        // tab, which starved the plots of points.
+        if (bytes - sampledBytes >= 64 * 1024) {
+          const now = performance.now();
+          const span = now - sampledAt;
+          if (span >= 100) {
+            const mbps = ((bytes - sampledBytes) * 8) / (span / 1000) / 1e6;
+            samples.push(mbps);
+            pushHeroSample(direction, mbps);
+            sampledBytes = bytes;
+            sampledAt = now;
+          }
+        }
         if (onProgress) onProgress(Math.min(1, bytes / size));
       };
       tasks.push(direction === 'down'
@@ -941,7 +959,6 @@
       partial = true;
     } finally {
       clearTimeout(timer);
-      clearInterval(sampler);
       signal.removeEventListener('abort', relayAbort);
       stopProbes();
     }
@@ -1023,7 +1040,7 @@
   }
 
   function emptyMetrics() {
-    return { down: null, up: null, lat: null, jitter: null, loss: null, loadedDown: null, loadedUp: null };
+    return { down: null, up: null, lat: null, jitter: null, jit: null, loss: null, loadedDown: null, loadedUp: null };
   }
 
   function resetMetrics() {
@@ -1078,6 +1095,8 @@
       const latency = await measureLatency(signal, CFG.latencyProbes, (fraction) => phaseProgress('latency', fraction));
       metrics.lat = latency.median;
       metrics.jitter = latency.jitter;
+      // The scale rows read `jit`, the scores read `jitter`.
+      metrics.jit = latency.jitter;
       metrics.loss = latency.loss;
       setMetric(el.lat, latency.median, 'ms');
       setMetric(el.jit, latency.jitter, 'ms');
