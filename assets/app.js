@@ -103,6 +103,53 @@
     return 1;
   }
 
+  /** A path can get slower the more connections you open: a VirtualBox bridge
+   *  or a NAT that serialises flows drops from ~90 Mbps on one stream to ~13
+   *  Mbps on six. Measure 1, 2, 4 and 6 streams and cap the large stages to the
+   *  best of them, so the result reflects the path and not our own concurrency. */
+  const MAX_STREAMS = 6;
+  const CALIBRATION_STREAMS = [1, 2, 4, 6];
+  const CALIBRATION_MS = 1200;
+  const calibration = { cap: null, mbps: null };
+
+  async function measureStreams(count, ms, parentSignal) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    const relay = () => controller.abort();
+    parentSignal.addEventListener('abort', relay, { once: true });
+    let bytes = 0;
+    const started = performance.now();
+    const tasks = [];
+    for (let index = 0; index < count; index += 1) {
+      tasks.push(downloadAmount(controller.signal, 64 * 1024 * 1024, (count2) => { bytes += count2; }).catch(() => {}));
+    }
+    try {
+      await Promise.all(tasks);
+    } finally {
+      clearTimeout(timer);
+      parentSignal.removeEventListener('abort', relay);
+    }
+    const elapsed = Math.max(performance.now() - started, 1);
+    return bytes === 0 ? 0 : (bytes * 8) / (elapsed / 1000) / 1e6;
+  }
+
+  async function calibrateStreams(signal) {
+    let best = { count: 1, mbps: 0 };
+    for (const count of CALIBRATION_STREAMS) {
+      if (signal.aborted) throw abortError();
+      let mbps = 0;
+      try {
+        mbps = await measureStreams(count, CALIBRATION_MS, signal);
+      } catch (err) {
+        if (signal.aborted) throw abortError();
+      }
+      if (mbps > best.mbps * 1.05) best = { count, mbps };
+    }
+    calibration.cap = best.mbps > 0 ? best.count : 1;
+    calibration.mbps = best.mbps;
+    return calibration.cap;
+  }
+
   /** Per-stage deadline. A stage that runs out of time is still reported: the
    *  bytes it moved over the elapsed time are a real measurement. The largest
    *  stage must never be skipped, because that is where the peak shows. */
@@ -506,7 +553,7 @@
   }
 
   async function runStage(signal, direction, size, streaming, onProgress) {
-    const streams = streamsFor(size);
+    const streams = Math.max(1, Math.min(streamsFor(size), calibration.cap || MAX_STREAMS));
     const slice = Math.floor(size / streams);
     const loaded = [];
     let bytes = 0;
@@ -558,11 +605,16 @@
   }
 
   async function runStages(signal, direction, streaming, onProgress, onStage) {
+    if (direction === 'down') calibration.cap = null;
     for (let index = 0; index < CFG.stages.length; index += 1) {
       const size = CFG.stages[index];
       const base = index / CFG.stages.length;
       const span = 1 / CFG.stages.length;
       const label = direction === 'down' ? 'Download' : 'Upload';
+      if (direction === 'down' && size >= 4 * 1024 * 1024 && calibration.cap === null) {
+        setStatus('Checking how many streams this link wants');
+        await calibrateStreams(signal);
+      }
       setStatus(`${label} ${formatBytes(size)}`);
       const result = await runStage(signal, direction, size, streaming, (fraction) => onProgress(base + span * fraction));
       onStage(result);
