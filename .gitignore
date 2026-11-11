@@ -1,0 +1,27 @@
+# local configuration and secrets
+.env
+.env.*
+!.env.git
+!.env.example
+
+# generated build output
+app/dist/
+
+# runtime noise
+*.log
+node_modules/
+.DS_Store
+Thumbs.db
+
+# workspace capture/check artifacts (not part of the deployable project)
+.freebuff/
+capture/
+checks/
+inbox/
+investigation.cany/
+reference/
+craft.json
+feed.json
+transcript.json
+usage.json
+build-activity.log

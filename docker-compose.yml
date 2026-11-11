@@ -1,0 +1,42 @@
+# Private speed test. Arcane (or plain `docker compose up -d --build`) uses this
+# file from the repository root; values come from .env, defaults live in .env.git.
+services:
+  speedtest:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: ${SPEEDTEST_IMAGE:-speedtest:local}
+    container_name: ${CONTAINER_NAME:-speedtest}
+    ports:
+      # Bind to 127.0.0.1 in .env when the host is not dedicated to this tool.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      # The app starts test workers as sibling containers from this same image,
+      # overriding the command, and removes them when they go idle.
+      WORKER_PROVIDER: "${WORKER_PROVIDER:-auto}"
+      WORKER_IMAGE: "${SPEEDTEST_IMAGE:-speedtest:local}"
+      WORKER_COMMAND: "${WORKER_COMMAND:-node worker/server.mjs}"
+      WORKER_WORKDIR: "${WORKER_WORKDIR:-/app}"
+      WORKER_NETWORK: "${WORKER_NETWORK:-speedtest-workers}"
+      WORKER_PORT: "${WORKER_PORT:-8080}"
+      WORKER_POOL_SIZE: "${WORKER_POOL_SIZE:-3}"
+      WORKER_IDLE_SECONDS: "${WORKER_IDLE_SECONDS:-120}"
+      WORKER_MAX_BYTES: "${WORKER_MAX_BYTES:-536870912}"
+      WORKER_LOCATION: "${WORKER_LOCATION:-Local Docker Network}"
+      DOCKER_SOCKET: "/var/run/docker.sock"
+    volumes:
+      # Root-equivalent access to the host daemon: required to create and remove
+      # worker containers. Do not expose this app to untrusted networks.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - speedtest-workers
+    restart: unless-stopped
+    # Give the app time to remove its worker containers on shutdown.
+    stop_grace_period: 20s
+
+networks:
+  # Workers join this network and are reached by container IP. They publish no
+  # ports, so only the app is reachable from outside.
+  speedtest-workers:
+    name: ${WORKER_NETWORK:-speedtest-workers}

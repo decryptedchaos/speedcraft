@@ -1,0 +1,9 @@
+{
+  "name": "local-speed-test",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs",
+    "docker:up": "docker compose up -d --build"
+  }
+}

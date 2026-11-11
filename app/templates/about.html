@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About the Speed Test</title>
+  <meta name="description" content="How this self-hosted speed test works, what it measures and how each result is calculated.">
+  <meta property="og:title" content="About the Speed Test">
+  <meta property="og:description" content="How this self-hosted speed test works, what it measures and how each result is calculated.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="about-page">
+  <div class="container about-container">
+    <header class="site-header">
+      <a class="brand" href="/">
+        <img class="brand-mark" src="/static/img/brand.svg" alt="" width="45" height="28">
+        <span class="brand-text">Speed Test</span>
+      </a>
+      <div class="header-actions">
+        <button class="icon-btn" aria-label="Language" data-menu-btn="lang" type="button" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M128,24A104,104,0,1,0,232,128,104.12,104.12,0,0,0,128,24Zm87.63,96H175.8a167.51,167.51,0,0,0-21.07-73.13A88.18,88.18,0,0,1,215.63,120ZM128,40.71A151.72,151.72,0,0,1,159.62,120H96.38A151.72,151.72,0,0,1,128,40.71ZM96.38,136h63.24A151.72,151.72,0,0,1,128,215.29,151.72,151.72,0,0,1,96.38,136ZM40.37,136H80.2a167.51,167.51,0,0,0,21.07,73.13A88.18,88.18,0,0,1,40.37,136ZM80.2,120H40.37a88.18,88.18,0,0,1,60.9-73.13A167.51,167.51,0,0,0,80.2,120Zm74.53,89.13A167.51,167.51,0,0,0,175.8,136h39.83A88.18,88.18,0,0,1,154.73,209.13Z"/></svg>
+        </button>
+        <div class="menu lang" data-menu="lang" aria-label="Language" role="menu">
+          <h4>Language</h4>
+          <button class="opt active" type="button" role="menuitem">English</button>
+          <button class="opt" type="button" role="menuitem">Español</button>
+          <button class="opt" type="button" role="menuitem">Français</button>
+          <button class="opt" type="button" role="menuitem">Deutsch</button>
+          <button class="opt" type="button" role="menuitem">日本語</button>
+        </div>
+        <button class="icon-btn" aria-label="Appearance" data-menu-btn="theme" type="button" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm8,16.37a88.11,88.11,0,0,1,0,175.26ZM120,40.37V215.63a88.11,88.11,0,0,1,0-175.26Z"/></svg>
+        </button>
+        <div class="menu" data-menu="theme" aria-label="Appearance" role="menu">
+          <h4>Appearance</h4>
+          <button class="opt active" type="button" role="menuitem">System</button>
+          <button class="opt" type="button" role="menuitem">Light</button>
+          <button class="opt" type="button" role="menuitem">Dark</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="about-main">
+      <section class="about-intro">
+        <h1>About</h1>
+        <p>This is a private speed test. You can use it to check the speed and consistency of your connection, verify what your provider actually delivers, compare networks, or test connectivity in different parts of a building.</p>
+        <p>Everything you measure here is measured against a test worker on this deployment. There is no third-party network in the path, and no result leaves the machine.</p>
+      </section>
+
+      <h2 class="faq-title">FAQs</h2>
+
+      <section class="faq-section">
+        <h3>Why run another speed test tool?</h3>
+        <p>Public speed tests measure your connection to one specific provider's network. Running your own instance means you measure the path you actually care about: from your browser to a machine you control. It also means the tool keeps working when the Internet is degraded, which is exactly when you want to measure it.</p>
+      </section>
+
+      <section class="faq-section">
+        <h3>How did you build this tool?</h3>
+        <p>The front end is a static page: HTML, CSS and a single JavaScript file. The server is a small Node application with no dependencies at all.</p>
+        <p>Measurements do not run inside that application. The application talks to the Docker daemon through the mounted socket and starts short-lived <strong>test worker</strong> containers on demand, on a private Docker network. Each browser session is pinned to one worker, and workers are removed again after a period of inactivity.</p>
+        <p>Because the workers publish no ports and the browser only ever talks to the application, the page stays same-origin and exactly one port is exposed. Download and upload traffic is piped straight through to the worker without being buffered, so the numbers describe the wire, not the application's memory.</p>
+      </section>
+
+      <section class="faq-section">
+        <h3>What does a test worker do?</h3>
+        <p>A worker is a tiny HTTP server with four jobs:</p>
+        <ul>
+          <li><code>/__speed/ping</code> answers a small, uncached request, used for latency probes.</li>
+          <li><code>/__speed/down?bytes=N</code> streams N bytes of incompressible data from a preallocated buffer, honouring backpressure, up to a configured cap.</li>
+          <li><code>/__speed/up</code> reads the request body and counts it, without storing anything.</li>
+          <li><code>/__speed/meta</code> reports the worker label so the page can show where it is testing.</li>
+        </ul>
+        <p>Nothing is written to disk and no measurement is recorded. Worker containers run read-only, with all capabilities dropped, a memory limit, a CPU limit and a process limit.</p>
+      </section>
+
+      <section class="faq-section" id="how">
+        <h3>How does it work?</h3>
+        <p><strong>Latency</strong> is the median of 20 sequential probes, each timed from request to complete response. <strong>Jitter</strong> is the average absolute difference between consecutive probes. <strong>Packet loss</strong> is the share of those probes that failed — it is measured with HTTP requests, not UDP, so it reflects loss as your browser and this server experience it.</p>
+        <p><strong>Download and upload</strong> each run four parallel streams for an eight-second window. Throughput is sampled every 200 ms, the first 700 ms are discarded as warm-up, and the reported figure is the 90th percentile of the remaining samples. That keeps a single slow request from dragging the result down while ignoring startup ramp-up.</p>
+        <p><strong>Loaded latency</strong> is measured by firing a small probe every 500 ms while the download and the upload windows run, so you can see how the connection behaves under load instead of only when idle.</p>
+        <p>The <strong>Network Quality Score</strong> turns those numbers into three grades: streaming from download speed, loaded download latency and loss; gaming from idle latency, jitter and loss; and video calls from upload speed, loaded upload latency, jitter and loss.</p>
+      </section>
+
+      <section class="faq-section" id="privacy">
+        <h3>Do you collect any data?</h3>
+        <p>No. There is no analytics script, no external font or image request, and no result is stored on the server. The page fetches its own files and the measurement endpoints, and that is all. Worker containers and their bookkeeping live in memory for as long as they exist, and disappear with them.</p>
+      </section>
+
+      <section class="faq-section">
+        <h3>How can I improve my speed?</h3>
+        <p>Test at different times of day and from a wired connection to separate local Wi-Fi problems from the line itself. Move closer to the access point, use the 5 GHz or 6 GHz band when available, close background transfers, and check whether a VPN or a busy router is adding latency. If download is fast but loaded latency is high, the issue is usually buffering in the router or modem.</p>
+      </section>
+
+      <section class="faq-section">
+        <h3>Why are my results different than other speed tests?</h3>
+        <p>Two reasons. First, the destination: a server on your own network, in your own building, is a shorter path than a public speed test's nearest data centre. Second, the method: how long a test runs, how many streams it uses, and whether it reports an average, a peak or a percentile all change the number you see.</p>
+        <p>This tool reports the 90th percentile of sampled throughput over an eight-second window with four parallel streams, and it names every figure it shows, so you can compare it fairly with anything else you use.</p>
+      </section>
+
+      <section class="faq-section">
+        <h3>What is the map showing?</h3>
+        <p>The map is a static illustration, not a geolocation lookup. The test server name in the sidebar comes from the <code>WORKER_LOCATION</code> setting of this deployment, and the address shown is the one this server sees for your browser. Nothing about your location is looked up or sent anywhere.</p>
+      </section>
+    </main>
+
+    <footer class="site-footer about-footer">
+      <p>&copy; 2026 Speed Test</p>
+      <div class="footer-links">
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+        <a href="/about#how">Methodology</a>
+      </div>
+    </footer>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
