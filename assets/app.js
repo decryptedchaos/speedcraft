@@ -60,6 +60,7 @@
     $all('[data-theme-value]').forEach((button) => {
       button.classList.toggle('active', button.getAttribute('data-theme-value') === mode);
     });
+    setTimeout(() => { try { redrawAllCharts(); } catch { /* charts not ready yet */ } }, 0);
   }
 
   $all('[data-theme-value]').forEach((button) => {
@@ -114,8 +115,11 @@
     ip: $('#meta-ip'),
     nqs: $all('.nqs-item'),
     scale: $('#scale-grid'),
-    stageDown: $('#stage-download-body'),
-    stageUp: $('#stage-upload-body'),
+    stageDown: $('#stage-download-cards'),
+    stageUp: $('#stage-upload-cards'),
+    latencyCards: $('#latency-cards'),
+    chartDown: $('#chart-download'),
+    chartUp: $('#chart-upload'),
   };
 
   const CFG = {
@@ -313,19 +317,319 @@
     }).join('');
   }
 
-  function renderStages(body, stages, emptyText) {
-    if (!body) return;
-    if (!stages.length) {
-      body.innerHTML = `<tr class="stage-empty"><td colspan="4">${emptyText}</td></tr>`;
+  /* ------------------------------------------------------------- charts */
+
+  const DOWN_COLOR = '#f7941d';
+  const UP_COLOR = '#8b5cf6';
+  const LAT_COLOR = '#22a06b';
+  const HERO_SLOTS = 150;
+
+  const charts = {
+    down: { canvas: el.chartDown, series: [], color: DOWN_COLOR },
+    up: { canvas: el.chartUp, series: [], color: UP_COLOR },
+  };
+
+  const lastResults = { down: [], up: [], latency: { unloaded: [], down: [], up: [] } };
+
+  let chartTimer = null;
+
+  function themeColor(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function fontFor(size) { return `${size}px ${themeColor('--font-sans', 'sans-serif')}`; }
+
+  function prepCanvas(canvas) {
+    if (!canvas) return null;
+    const width = Math.max(1, Math.round(canvas.clientWidth || 0));
+    const height = Math.max(1, Math.round(canvas.clientHeight || 0));
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    return { ctx, width, height };
+  }
+
+  /** Round up to 1, 2 or 5 times a power of ten so the axis stops jittering. */
+  function niceMax(value) {
+    if (!Number.isFinite(value) || value <= 0) return 10;
+    const power = Math.pow(10, Math.floor(Math.log10(value)));
+    const scaled = value / power;
+    const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+    return step * power;
+  }
+
+  function pushHeroSample(direction, mbps) {
+    const chart = charts[direction];
+    if (!chart || !Number.isFinite(mbps)) return;
+    chart.series.push(mbps);
+    if (chart.series.length > 600) chart.series.splice(0, chart.series.length - 600);
+  }
+
+  /** The live line: grows left to right, fills underneath and keeps the 90th
+   *  percentile drawn above it, the way the original speed test reads. */
+  function drawHero(direction) {
+    const chart = charts[direction];
+    const prepared = prepCanvas(chart.canvas);
+    if (!prepared) return;
+    const { ctx, width, height } = prepared;
+    const line = themeColor('--line', '#d4d4d4');
+    const muted = themeColor('--muted', '#737373');
+    const series = chart.series.slice(-HERO_SLOTS);
+    const top = 12;
+    const bottom = height - 12;
+    const innerHeight = Math.max(1, bottom - top);
+    const max = niceMax(Math.max.apply(null, series.concat([1])) * 1.15);
+    const xAt = (index) => (index / Math.max(1, HERO_SLOTS - 1)) * width;
+    const yAt = (value) => bottom - Math.min(1, Math.max(0, value) / max) * innerHeight;
+
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, bottom + 0.5);
+    ctx.lineTo(width, bottom + 0.5);
+    ctx.stroke();
+
+    if (!series.length) {
+      ctx.fillStyle = muted;
+      ctx.font = fontFor(11);
+      ctx.fillText('waiting for samples', 1, top + 8);
       return;
     }
-    body.innerHTML = stages.map((stage) => {
-      const grade = gradeFor(stage.mbps, DOWNLOAD_SCALE) || 1;
-      const loaded = stage.loaded === null || stage.loaded === undefined ? '-' : `${stage.loaded.toFixed(1)} ms`;
+
+    const p90 = percentile(series, 90);
+    if (p90) {
+      const y = yAt(p90);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = line;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = muted;
+      ctx.font = fontFor(10);
+      ctx.fillText(`90th percentile ${p90.toFixed(1)} Mbps`, 1, Math.max(9, y - 5));
+    }
+
+    const gradient = ctx.createLinearGradient(0, top, 0, bottom);
+    gradient.addColorStop(0, `${chart.color}b3`);
+    gradient.addColorStop(1, `${chart.color}00`);
+    ctx.beginPath();
+    ctx.moveTo(xAt(0), yAt(series[0]));
+    for (let index = 1; index < series.length; index += 1) ctx.lineTo(xAt(index), yAt(series[index]));
+    ctx.lineTo(xAt(series.length - 1), bottom);
+    ctx.lineTo(xAt(0), bottom);
+    ctx.closePath();
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(xAt(0), yAt(series[0]));
+    for (let index = 1; index < series.length; index += 1) ctx.lineTo(xAt(index), yAt(series[index]));
+    ctx.strokeStyle = chart.color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    const headX = xAt(series.length - 1);
+    const headY = yAt(series[series.length - 1]);
+    ctx.beginPath();
+    ctx.arc(headX, headY, 6, 0, Math.PI * 2);
+    ctx.fillStyle = `${chart.color}40`;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(headX, headY, 3, 0, Math.PI * 2);
+    ctx.fillStyle = chart.color;
+    ctx.fill();
+  }
+
+  function startChartLoop() {
+    if (chartTimer) return;
+    chartTimer = setInterval(() => { drawHero('down'); drawHero('up'); }, 110);
+  }
+
+  function stopChartLoop() {
+    if (chartTimer) { clearInterval(chartTimer); chartTimer = null; }
+  }
+
+  /** Every sample of a stage on a log speed axis, with quartiles, median and
+   *  whiskers: the point cloud shows the spread a single average hides. */
+  function drawPointCloud(canvas, values, color) {
+    const prepared = prepCanvas(canvas);
+    if (!prepared) return;
+    const { ctx, width, height } = prepared;
+    const line = themeColor('--line', '#d4d4d4');
+    const muted = themeColor('--muted', '#737373');
+    const numeric = (values || []).filter((value) => Number.isFinite(value) && value > 0);
+    const top = 8;
+    const bottom = height - 12;
+    const innerHeight = Math.max(1, bottom - top);
+    const axisMax = niceMax(Math.max.apply(null, numeric.concat([1])) * 1.4);
+    const xAt = (value) => (Math.log10(Math.max(1, Math.min(axisMax, value))) / Math.log10(axisMax)) * width;
+
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, bottom + 0.5);
+    ctx.lineTo(width, bottom + 0.5);
+    ctx.stroke();
+
+    ctx.fillStyle = muted;
+    ctx.font = fontFor(9);
+    ctx.fillText('0', 1, height - 1);
+    const label = axisMax >= 1000 ? `${axisMax / 1000} Gbps` : `${axisMax} Mbps`;
+    ctx.fillText(label, Math.max(0, width - ctx.measureText(label).width - 1), height - 1);
+
+    if (!numeric.length) return;
+
+    const q1 = percentile(numeric, 25);
+    const q2 = percentile(numeric, 50);
+    const q3 = percentile(numeric, 75);
+    const midY = top + innerHeight / 2;
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(xAt(Math.min.apply(null, numeric)), midY);
+    ctx.lineTo(xAt(Math.max.apply(null, numeric)), midY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = color;
+    ctx.fillRect(xAt(q1), midY - 5, Math.max(2, xAt(q3) - xAt(q1)), 10);
+    ctx.strokeStyle = themeColor('--card', '#ffffff');
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(xAt(q2), midY - 8);
+    ctx.lineTo(xAt(q2), midY + 8);
+    ctx.stroke();
+
+    numeric.forEach((value, index) => {
+      const wobble = Math.sin(index * 12.9898) * 0.5 + Math.sin(index * 4.1414) * 0.5;
+      const y = midY + wobble * Math.max(3, innerHeight / 2 - 4);
+      ctx.beginPath();
+      ctx.arc(xAt(value), y, 1.9, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function drawLatencyPlot(canvas, values, color) {
+    const prepared = prepCanvas(canvas);
+    if (!prepared) return;
+    const { ctx, width, height } = prepared;
+    const line = themeColor('--line', '#d4d4d4');
+    const muted = themeColor('--muted', '#737373');
+    const numeric = (values || []).filter((value) => Number.isFinite(value));
+    const top = 8;
+    const bottom = height - 12;
+    const innerHeight = Math.max(1, bottom - top);
+    const axisMax = Math.max(1, Math.max.apply(null, numeric.concat([1])) * 1.1);
+    const xAt = (value) => Math.min(1, Math.max(0, value / axisMax)) * width;
+
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, bottom + 0.5);
+    ctx.lineTo(width, bottom + 0.5);
+    ctx.stroke();
+
+    ctx.fillStyle = muted;
+    ctx.font = fontFor(9);
+    ctx.fillText('0 ms', 1, height - 1);
+    const label = `${Math.round(axisMax)} ms`;
+    ctx.fillText(label, Math.max(0, width - ctx.measureText(label).width - 1), height - 1);
+
+    if (!numeric.length) return;
+
+    const med = median(numeric);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    ctx.moveTo(xAt(med), top);
+    ctx.lineTo(xAt(med), bottom);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    numeric.forEach((value, index) => {
+      const wobble = Math.sin(index * 7.31) * 0.5 + Math.sin(index * 2.17) * 0.5;
+      const y = top + innerHeight / 2 + wobble * Math.max(3, innerHeight / 2 - 4);
+      ctx.beginPath();
+      ctx.arc(xAt(value), y, 1.9, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function renderStages(container, stages, emptyText, direction) {
+    if (!container) return;
+    if (!stages.length) {
+      container.innerHTML = `<p class="measure-empty">${emptyText}</p>`;
+      return;
+    }
+    const color = direction === 'up' ? UP_COLOR : DOWN_COLOR;
+    container.innerHTML = stages.map((stage, index) => {
+      const samples = stage.samples || [];
+      const centre = samples.length ? median(samples) : stage.mbps;
+      const loaded = stage.loaded === null || stage.loaded === undefined ? '-' : `${stage.loaded.toFixed(0)} ms`;
       const note = stage.partial ? ' <span class="stage-note">partial</span>' : '';
-      return `<tr><td class="grade"><span class="stage-dot grade-${grade}"></span></td>`
-        + `<td>${formatBytes(stage.size)}</td><td>${stage.mbps.toFixed(1)} Mbps${note}</td><td>${loaded}</td></tr>`;
+      return '<article class="measure-card">'
+        + `<header class="measure-head"><span class="measure-name">${formatBytes(stage.size)} ${direction === 'up' ? 'upload' : 'download'}${note}</span>`
+        + `<span class="measure-count">${samples.length} samples</span></header>`
+        + `<canvas class="measure-canvas" data-index="${index}" aria-hidden="true"></canvas>`
+        + `<footer class="measure-foot"><span>median ${centre.toFixed(1)} Mbps</span><span>${loaded}</span></footer>`
+        + '</article>';
     }).join('');
+    container.querySelectorAll('canvas').forEach((canvas) => {
+      const stage = stages[Number(canvas.getAttribute('data-index'))];
+      drawPointCloud(canvas, stage.samples || [], color);
+    });
+  }
+
+  function renderLatencyCards(unloaded, loadedDown, loadedUp) {
+    if (!el.latencyCards) return;
+    const groups = [
+      { name: 'Unloaded latency', values: unloaded || [], color: LAT_COLOR },
+      { name: 'Latency during download', values: loadedDown || [], color: DOWN_COLOR },
+      { name: 'Latency during upload', values: loadedUp || [], color: UP_COLOR },
+    ];
+    el.latencyCards.innerHTML = groups.map((group, index) => {
+      const values = group.values.filter((value) => Number.isFinite(value));
+      const med = values.length ? median(values) : null;
+      const p95 = values.length ? percentile(values, 95) : null;
+      return '<article class="measure-card">'
+        + `<header class="measure-head"><span class="measure-name">${group.name}</span>`
+        + `<span class="measure-count">${values.length} probes</span></header>`
+        + `<canvas class="measure-canvas" data-latency="${index}" aria-hidden="true"></canvas>`
+        + `<footer class="measure-foot"><span>median ${med === null ? '-' : `${med.toFixed(1)} ms`}</span>`
+        + `<span>${p95 === null ? '' : `p95 ${p95.toFixed(1)} ms`}</span></footer>`
+        + '</article>';
+    }).join('');
+    el.latencyCards.querySelectorAll('canvas').forEach((canvas) => {
+      const group = groups[Number(canvas.getAttribute('data-latency'))];
+      drawLatencyPlot(canvas, group.values, group.color);
+    });
+  }
+
+  /** Theme switches change the CSS variables the plots read, so redraw them. */
+  function redrawAllCharts() {
+    drawHero('down');
+    drawHero('up');
+    renderStages(el.stageDown, lastResults.down, 'Download not measured yet', 'down');
+    renderStages(el.stageUp, lastResults.up, 'Upload not measured yet', 'up');
+    renderLatencyCards(lastResults.latency.unloaded, lastResults.latency.down, lastResults.latency.up);
   }
 
   const SCORE_LABELS = { 1: 'Poor', 2: 'Okay', 3: 'Good', 4: 'Great', 5: 'Excellent' };
@@ -426,6 +730,7 @@
       jitter: deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : null,
       loss: (failures / probes) * 100,
       samples: samples.length,
+      values: samples.slice(),
     };
   }
 
@@ -591,7 +896,10 @@
     const streams = Math.max(1, Math.min(streamsFor(size), calibration.cap || MAX_STREAMS));
     const slice = Math.floor(size / streams);
     const loaded = [];
+    const samples = [];
     let bytes = 0;
+    let sampledBytes = 0;
+    let sampledAt = performance.now();
 
     const budget = new AbortController();
     const timer = setTimeout(() => budget.abort(), budgetFor(size));
@@ -600,6 +908,18 @@
 
     const stopProbes = watchLoadedLatency(budget.signal, loaded);
     const started = performance.now();
+    const sampler = setInterval(() => {
+      const now = performance.now();
+      const span = Math.max(now - sampledAt, 1);
+      const moved = bytes - sampledBytes;
+      sampledBytes = bytes;
+      sampledAt = now;
+      const mbps = (moved * 8) / (span / 1000) / 1e6;
+      if (mbps > 0) {
+        samples.push(mbps);
+        pushHeroSample(direction, mbps);
+      }
+    }, 140);
     const tasks = [];
     for (let index = 0; index < streams; index += 1) {
       const amount = index === streams - 1 ? size - slice * (streams - 1) : slice;
@@ -621,6 +941,7 @@
       partial = true;
     } finally {
       clearTimeout(timer);
+      clearInterval(sampler);
       signal.removeEventListener('abort', relayAbort);
       stopProbes();
     }
@@ -629,12 +950,19 @@
     if (bytes === 0) {
       throw new Error(`the ${formatBytes(size)} stage moved no data`);
     }
+    const mbps = (bytes * 8) / (Math.max(elapsed, 1) / 1000) / 1e6;
+    if (!samples.length) {
+      samples.push(mbps);
+      pushHeroSample(direction, mbps);
+    }
     return {
       size,
       bytes,
       ms: elapsed,
-      mbps: (bytes * 8) / (Math.max(elapsed, 1) / 1000) / 1e6,
+      mbps,
+      samples,
       loaded: median(loaded),
+      loadedValues: loaded.slice(),
       partial,
     };
   }
@@ -706,8 +1034,16 @@
     setMetric(el.loss, null);
     renderScores(emptyMetrics());
     renderScale(emptyMetrics());
-    renderStages(el.stageDown, [], 'Download not measured yet');
-    renderStages(el.stageUp, [], 'Upload not measured yet');
+    charts.down.series.length = 0;
+    charts.up.series.length = 0;
+    lastResults.down = [];
+    lastResults.up = [];
+    lastResults.latency = { unloaded: [], down: [], up: [] };
+    renderStages(el.stageDown, [], 'Download not measured yet', 'down');
+    renderStages(el.stageUp, [], 'Upload not measured yet', 'up');
+    renderLatencyCards([], [], []);
+    drawHero('down');
+    drawHero('up');
     setProgress(0);
   }
 
@@ -727,12 +1063,15 @@
     const metrics = emptyMetrics();
     const downloadStages = [];
     const uploadStages = [];
+    const loadedDownAll = [];
+    const loadedUpAll = [];
 
     try {
       phaseProgress('connect', 0.2);
       const meta = await fetchMeta(signal);
       renderMeta(meta);
       state.base = await pickOrigin(meta, signal);
+      startChartLoop();
       phaseProgress('connect', 1);
 
       setStatus('Measuring latency');
@@ -746,6 +1085,8 @@
       if (el.lat) {
         el.lat.title = `median of ${latency.samples} probes, lowest ${latency.min === null ? '-' : latency.min.toFixed(1)} ms`;
       }
+      lastResults.latency.unloaded = latency.values || [];
+      renderLatencyCards(lastResults.latency.unloaded, lastResults.latency.down, lastResults.latency.up);
       renderScale(metrics);
       phaseProgress('latency', 1);
 
@@ -758,12 +1099,16 @@
         (fraction) => phaseProgress('download', fraction),
         (stage) => {
           downloadStages.push(stage);
+          if (stage.loadedValues && stage.loadedValues.length) loadedDownAll.push.apply(loadedDownAll, stage.loadedValues);
           const best = bestStage(downloadStages);
           metrics.down = best ? best.mbps : metrics.down;
           metrics.loadedDown = best ? best.loaded : metrics.loadedDown;
           setMetric(el.down, metrics.down, 'Mbps');
           if (el.down) el.down.title = 'best measured stage, with loaded latency during it';
-          renderStages(el.stageDown, downloadStages, 'Download not measured yet');
+          lastResults.down = downloadStages.slice();
+          lastResults.latency.down = loadedDownAll.slice();
+          renderStages(el.stageDown, downloadStages, 'Download not measured yet', 'down');
+          renderLatencyCards(lastResults.latency.unloaded, loadedDownAll, loadedUpAll);
           renderScale(metrics);
         },
       );
@@ -776,12 +1121,16 @@
         (fraction) => phaseProgress('upload', fraction),
         (stage) => {
           uploadStages.push(stage);
+          if (stage.loadedValues && stage.loadedValues.length) loadedUpAll.push.apply(loadedUpAll, stage.loadedValues);
           const best = bestStage(uploadStages);
           metrics.up = best ? best.mbps : metrics.up;
           metrics.loadedUp = best ? best.loaded : metrics.loadedUp;
           setMetric(el.up, metrics.up, 'Mbps');
           if (el.up) el.up.title = 'best measured stage, with loaded latency during it';
-          renderStages(el.stageUp, uploadStages, 'Upload not measured yet');
+          lastResults.up = uploadStages.slice();
+          lastResults.latency.up = loadedUpAll.slice();
+          renderStages(el.stageUp, uploadStages, 'Upload not measured yet', 'up');
+          renderLatencyCards(lastResults.latency.unloaded, loadedDownAll, loadedUpAll);
           renderScale(metrics);
         },
       );
@@ -800,6 +1149,7 @@
         renderScores(metrics);
       }
     } finally {
+      stopChartLoop();
       state.running = false;
       state.controller = null;
       if (el.play) el.play.disabled = true;

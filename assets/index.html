@@ -61,10 +61,12 @@
             <div class="metric-block">
               <div class="metric-label">Download <span class="info-icon" title="Info"><svg viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z"/></svg></span></div>
               <div class="value-big" id="val-download">-</div>
+              <canvas class="hero-chart" id="chart-download" aria-hidden="true"></canvas>
             </div>
             <div class="metric-block">
               <div class="metric-label">Upload <span class="info-icon" title="Info"><svg viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z"/></svg></span></div>
               <div class="value-mid" id="val-upload">-</div>
+              <canvas class="hero-chart" id="chart-upload" aria-hidden="true"></canvas>
             </div>
             <div class="sub-metrics">
               <div class="sub-row">
@@ -157,21 +159,21 @@
         <section class="stages" aria-labelledby="stages-title">
           <header class="section-head">
             <h2 id="stages-title" class="section-title">Test Stages</h2>
-            <span class="section-note">speed and added latency per transfer size</span>
+            <span class="section-note">every sample plotted, with the spread per transfer size</span>
           </header>
-          <div class="stage-grid">
-            <table class="stage-table">
-              <thead><tr><th>Direction</th><th>Size</th><th>Speed</th><th>Loaded RTT</th></tr></thead>
-              <tbody id="stage-download-body">
-                <tr class="stage-empty"><td colspan="4">Download not measured yet</td></tr>
-              </tbody>
-            </table>
-            <table class="stage-table">
-              <thead><tr><th>Direction</th><th>Size</th><th>Speed</th><th>Loaded RTT</th></tr></thead>
-              <tbody id="stage-upload-body">
-                <tr class="stage-empty"><td colspan="4">Upload not measured yet</td></tr>
-              </tbody>
-            </table>
+          <div class="measure-grid">
+            <div class="measure-col">
+              <h3 class="measure-title">Download measurements</h3>
+              <div class="measure-list" id="stage-download-cards"></div>
+            </div>
+            <div class="measure-col">
+              <h3 class="measure-title">Upload measurements</h3>
+              <div class="measure-list" id="stage-upload-cards"></div>
+            </div>
+            <div class="measure-col">
+              <h3 class="measure-title">Latency measurements</h3>
+              <div class="measure-list" id="latency-cards"></div>
+            </div>
           </div>
         </section>
       </div>
