@@ -61,12 +61,15 @@ impl AppConfig {
 
 impl WorkerConfig {
     pub fn from_env() -> Self {
-        let command = text("WORKER_COMMAND", "speedtest worker");
         Self {
             provider: text("WORKER_PROVIDER", "auto").to_lowercase(),
             image: text("WORKER_IMAGE", "speedtest:local"),
-            command: command.split_whitespace().map(str::to_string).collect(),
-            workdir: text("WORKER_WORKDIR", "/app"),
+            // Same image, different subcommand. Deliberately never read from the
+            // environment: a stale WORKER_COMMAND left behind by an older deploy
+            // (for example "node worker/server.mjs") would stop every worker
+            // from starting with "executable file not found".
+            command: vec!["speedtest".to_string(), "worker".to_string()],
+            workdir: "/app".to_string(),
             network: text("WORKER_NETWORK", "speedtest-workers"),
             port: parse_int("WORKER_PORT", 8080).clamp(1, 65535) as u16,
             pool_size: parse_int("WORKER_POOL_SIZE", 3).max(1) as usize,
