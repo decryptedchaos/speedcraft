@@ -8,6 +8,16 @@
   <meta property="og:title" content="About the Speed Test">
   <meta property="og:description" content="How this self-hosted speed test works, what it measures and how each result is calculated.">
   <link rel="icon" href="/favicon.ico">
+  <script>
+    (function () {
+      try {
+        var mode = localStorage.getItem('speedtest.theme') || 'system';
+        var dark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme-mode', mode);
+      } catch (e) { /* private mode: keep the light palette */ }
+    })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="about-page">
@@ -34,9 +44,9 @@
         </button>
         <div class="menu" data-menu="theme" aria-label="Appearance" role="menu">
           <h4>Appearance</h4>
-          <button class="opt active" type="button" role="menuitem">System</button>
-          <button class="opt" type="button" role="menuitem">Light</button>
-          <button class="opt" type="button" role="menuitem">Dark</button>
+          <button class="opt active" type="button" role="menuitem" data-theme-value="system">System</button>
+          <button class="opt" type="button" role="menuitem" data-theme-value="light">Light</button>
+          <button class="opt" type="button" role="menuitem" data-theme-value="dark">Dark</button>
         </div>
       </div>
     </header>

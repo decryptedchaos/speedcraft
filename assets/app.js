@@ -43,6 +43,41 @@
     });
   });
 
+  /* ------------------------------------------------------------ theme */
+
+  // The inline script in <head> applies the stored choice before the first
+  // paint; this keeps the menu, the media query and the storage in sync.
+  const THEME_KEY = 'speedtest.theme';
+  const themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  let themeMode = document.documentElement.getAttribute('data-theme-mode') || 'system';
+
+  function applyTheme(mode) {
+    themeMode = mode;
+    const dark = mode === 'dark' || (mode === 'system' && Boolean(themeMedia && themeMedia.matches));
+    const root = document.documentElement;
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    root.setAttribute('data-theme-mode', mode);
+    $all('[data-theme-value]').forEach((button) => {
+      button.classList.toggle('active', button.getAttribute('data-theme-value') === mode);
+    });
+  }
+
+  $all('[data-theme-value]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const mode = button.getAttribute('data-theme-value');
+      try { localStorage.setItem(THEME_KEY, mode); } catch { /* storage blocked */ }
+      applyTheme(mode);
+    });
+  });
+
+  if (themeMedia) {
+    const followSystem = () => { if (themeMode === 'system') applyTheme('system'); };
+    if (themeMedia.addEventListener) themeMedia.addEventListener('change', followSystem);
+    else if (themeMedia.addListener) themeMedia.addListener(followSystem);
+  }
+
+  applyTheme(themeMode);
+
   const attrToggle = $('#map-attr-toggle');
   const attrSection = $('#map-attrib');
   if (attrToggle && attrSection) {
