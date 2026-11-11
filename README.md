@@ -51,6 +51,15 @@ docker compose up -d --build
 curl -s localhost:3390/healthz
 ```
 
+### Rebuilding after a code change
+
+`docker-compose.yml` names the image explicitly (`speedtest:rust1`) and workers
+are created from that same tag, so a deploy tool that only runs `up -d` cannot
+silently reuse the image a previous deploy left behind. Bump the tag in both
+places when the code changes, or deploy with `--build`. `/healthz` answers
+`"runtime":"rust"` (with a `version`) once the new binary is serving — if that
+field is missing, the old image is still running.
+
 ## Run without Docker (development)
 
 With no docker socket the app runs workers as local child processes of the same
@@ -58,7 +67,7 @@ binary, so the whole flow works on a machine without Docker:
 
 ```bash
 cargo run --release -- app      # http://localhost:3000, provider=native
-cargo test                      # unit-free smoke build
+cargo build --release           # compile check for the worker role too
 ```
 
 Workers can also be started by hand, which is handy when profiling:
@@ -93,7 +102,6 @@ optional: `docker-compose.yml` falls back to the same value inline.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `APP_PORT` / `APP_BIND` | `3390` / `0.0.0.0` | published port and bind address |
-| `SPEEDTEST_IMAGE` | `speedtest:local` | image tag built and reused for workers |
 | `WORKER_PROVIDER` | `auto` | `auto`, `docker` or `native` |
 | `WORKER_NETWORK` | `speedtest-workers` | docker network workers join |
 | `WORKER_PORT` | `8080` | worker port inside that network |

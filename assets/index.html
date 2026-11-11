@@ -135,6 +135,35 @@
             </li>
           </ul>
         </section>
+
+        <section class="quality" aria-labelledby="quality-title">
+          <header class="section-head">
+            <h2 id="quality-title" class="section-title">Result Scale</h2>
+            <span class="section-note">every measurement graded on a five-step scale</span>
+          </header>
+          <div class="scale-grid" id="scale-grid"></div>
+        </section>
+
+        <section class="stages" aria-labelledby="stages-title">
+          <header class="section-head">
+            <h2 id="stages-title" class="section-title">Test Stages</h2>
+            <span class="section-note">speed and added latency per transfer size</span>
+          </header>
+          <div class="stage-grid">
+            <table class="stage-table">
+              <thead><tr><th>Direction</th><th>Size</th><th>Speed</th><th>Loaded RTT</th></tr></thead>
+              <tbody id="stage-download-body">
+                <tr class="stage-empty"><td colspan="4">Download not measured yet</td></tr>
+              </tbody>
+            </table>
+            <table class="stage-table">
+              <thead><tr><th>Direction</th><th>Size</th><th>Speed</th><th>Loaded RTT</th></tr></thead>
+              <tbody id="stage-upload-body">
+                <tr class="stage-empty"><td colspan="4">Upload not measured yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
       <aside class="sidebar">

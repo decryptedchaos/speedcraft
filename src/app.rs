@@ -115,6 +115,9 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             "uptimeSeconds".to_string(),
             json!(state.started.elapsed().as_secs()),
         );
+        // Makes it obvious whether a deploy actually replaced the old runtime.
+        object.insert("runtime".to_string(), json!("rust"));
+        object.insert("version".to_string(), json!(env!("CARGO_PKG_VERSION")));
     }
     json_response(StatusCode::OK, payload)
 }

@@ -5,7 +5,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${SPEEDTEST_IMAGE:-speedtest:local}
+    # Versioned on purpose: a new tag is what makes compose build instead of
+    # silently reusing the image a previous deploy left behind. Bump it (here
+    # and in WORKER_IMAGE below) whenever the code changes.
+    image: speedtest:rust1
     container_name: ${CONTAINER_NAME:-speedtest}
     ports:
       # Bind to 127.0.0.1 in .env when the host is not dedicated to this tool.
@@ -16,7 +19,7 @@ services:
       # The app starts test workers as sibling containers from this same image,
       # overriding the command, and removes them when they go idle.
       WORKER_PROVIDER: "${WORKER_PROVIDER:-auto}"
-      WORKER_IMAGE: "${SPEEDTEST_IMAGE:-speedtest:local}"
+      WORKER_IMAGE: "speedtest:rust1"
       WORKER_NETWORK: "${WORKER_NETWORK:-speedtest-workers}"
       WORKER_PORT: "${WORKER_PORT:-8080}"
       WORKER_POOL_SIZE: "${WORKER_POOL_SIZE:-3}"

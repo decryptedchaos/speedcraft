@@ -78,28 +78,41 @@
     server: $('#meta-server'),
     ip: $('#meta-ip'),
     nqs: $all('.nqs-item'),
+    scale: $('#scale-grid'),
+    stageDown: $('#stage-download-body'),
+    stageUp: $('#stage-upload-body'),
   };
 
   const CFG = {
     latencyProbes: 20,
     latencyGapMs: 30,
+    // Four transfer sizes, smallest first: the small stages are dominated by
+    // connection setup and latency, the large ones by sustained throughput.
+    stages: [10 * 1024, 1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024],
     streams: 4,
-    windowMs: 8000,
-    warmupMs: 700,
-    sampleMs: 200,
-    downloadRequestBytes: 16 * 1024 * 1024,
-    uploadBufferBytes: 2 * 1024 * 1024,
-    uploadRequestBytes: 16 * 1024 * 1024,
-    uploadChunkBytes: 64 * 1024,
-    loadedProbeMs: 500,
+    uploadBuffer: 8 * 1024 * 1024,
+    uploadChunk: 256 * 1024,
+    loadedProbeMs: 150,
+    // Skip a stage when the previous one projects to longer than this.
+    maxStageMs: 30000,
   };
 
   const PHASE = {
-    connect: [0, 4],
-    latency: [4, 18],
-    download: [18, 58],
-    upload: [58, 100],
+    connect: [0, 2],
+    latency: [2, 14],
+    download: [14, 56],
+    upload: [56, 100],
   };
+
+  const SCALE_ROWS = [
+    { key: 'down', label: 'Download', unit: 'Mbps', digits: 1, grades: [500, 200, 50, 10] },
+    { key: 'up', label: 'Upload', unit: 'Mbps', digits: 1, grades: [200, 50, 15, 5] },
+    { key: 'lat', label: 'Latency', unit: 'ms', digits: 1, grades: [10, 25, 50, 100], lowerBetter: true },
+    { key: 'jit', label: 'Jitter', unit: 'ms', digits: 1, grades: [2, 5, 12, 30], lowerBetter: true },
+    { key: 'loss', label: 'Packet loss', unit: '%', digits: 2, grades: [0, 0.5, 1.5, 4], lowerBetter: true },
+  ];
+
+  const DOWNLOAD_SCALE = SCALE_ROWS[0];
 
   const state = { running: false, controller: null, base: '' };
 
@@ -129,13 +142,27 @@
 
   function median(values) { return percentile(values, 50); }
 
-  function mbps(bytes, ms) { return ms > 0 ? (bytes * 8) / (ms / 1000) / 1e6 : 0; }
-
   function cacheBuster() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
   // Workers publish their own host port when they can, which takes this app out
   // of the data path; an empty base means "go through the same-origin proxy".
   function speedUrl(path) { return `${state.base}${path}`; }
+
+  function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+  }
+
+  function gradeFor(value, row) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return null;
+    const grades = row.grades;
+    for (let index = 0; index < grades.length; index += 1) {
+      const passed = row.lowerBetter ? value <= grades[index] : value >= grades[index];
+      if (passed) return 5 - index;
+    }
+    return 1;
+  }
 
   /* ---------------------------------------------------------- progress */
 
@@ -170,6 +197,41 @@
     if (el.ip) el.ip.textContent = meta.clientIp || 'unavailable';
     const row = el.ip && el.ip.parentElement;
     if (row) row.title = `worker ${meta.workerId || 'unknown'} (${meta.workerMode || 'unknown'})`;
+  }
+
+  function renderScale(metrics) {
+    if (!el.scale) return;
+    el.scale.innerHTML = SCALE_ROWS.map((row) => {
+      const value = metrics[row.key];
+      const grade = gradeFor(value, row);
+      const cells = [5, 4, 3, 2, 1]
+        .map((step) => `<span class="cell grade-${step}${grade === step ? ' on' : ''}"></span>`)
+        .join('');
+      const text = value === null || value === undefined || !Number.isFinite(value)
+        ? '-'
+        : `${value.toFixed(row.digits)} ${row.unit}`;
+      return `<div class="scale-row"><span class="scale-name">${row.label}</span>`
+        + `<span class="scale-value">${text}</span>`
+        + `<span class="scale-cells" role="img" aria-label="${row.label} grade ${grade === null ? 'pending' : grade} of 5">${cells}</span></div>`;
+    }).join('');
+  }
+
+  function renderStages(body, stages, emptyText) {
+    if (!body) return;
+    if (!stages.length) {
+      body.innerHTML = `<tr class="stage-empty"><td colspan="4">${emptyText}</td></tr>`;
+      return;
+    }
+    body.innerHTML = stages.map((stage) => {
+      if (stage.skipped) {
+        return `<tr><td class="grade"><span class="stage-dot grade-1" style="opacity:.3"></span></td>`
+          + `<td>${formatBytes(stage.size)}</td><td>skipped</td><td>-</td></tr>`;
+      }
+      const grade = gradeFor(stage.mbps, DOWNLOAD_SCALE) || 1;
+      const loaded = stage.loaded === null || stage.loaded === undefined ? '-' : `${stage.loaded.toFixed(1)} ms`;
+      return `<tr><td class="grade"><span class="stage-dot grade-${grade}"></span></td>`
+        + `<td>${formatBytes(stage.size)}</td><td>${stage.mbps.toFixed(1)} Mbps</td><td>${loaded}</td></tr>`;
+    }).join('');
   }
 
   const SCORE_LABELS = { 1: 'Poor', 2: 'Okay', 3: 'Good', 4: 'Great', 5: 'Excellent' };
@@ -273,62 +335,36 @@
     };
   }
 
-  /**
-   * Runs the given streams for a fixed window, samples throughput every 200 ms
-   * and returns the raw samples so the caller can take a percentile.
-   */
-  async function timedWindow(signal, durationMs, startStreams, onSample) {
+  /** Small probes fired while a stage runs, for that stage's loaded latency. */
+  function watchLoadedLatency(signal, bucket) {
     const stop = new AbortController();
-    const window = { bytes: 0, error: null };
-    const tasks = startStreams(stop.signal, window).map((task) =>
-      task.catch((err) => {
-        if (err && err.name !== 'AbortError' && !window.error) window.error = err;
-      }));
-
-    const samples = [];
-    const startedAt = performance.now();
-    let lastBytes = 0;
-    let lastAt = startedAt;
-
-    const timer = setInterval(() => {
-      const now = performance.now();
-      const elapsed = now - lastAt;
-      if (elapsed <= 0) return;
-      const rate = mbps(window.bytes - lastBytes, elapsed);
-      lastBytes = window.bytes;
-      lastAt = now;
-      if (now - startedAt >= CFG.warmupMs) {
-        samples.push(rate);
-        if (onSample) onSample(samples, (now - startedAt) / durationMs);
+    (async () => {
+      while (!stop.signal.aborted && !signal.aborted) {
+        try {
+          bucket.push(await probe(stop.signal));
+        } catch (err) {
+          if (err && err.name === 'AbortError') break;
+        }
+        try {
+          await sleep(CFG.loadedProbeMs, stop.signal);
+        } catch {
+          break;
+        }
       }
-    }, CFG.sampleMs);
-
-    try {
-      await sleep(durationMs, signal);
-    } finally {
-      clearInterval(timer);
-      stop.abort();
-      await Promise.allSettled(tasks);
-    }
-
-    if (window.error) throw window.error;
-    return { bytes: window.bytes, samples };
+    })();
+    return () => stop.abort();
   }
 
-  function startDownloads(stopSignal, window) {
-    const tasks = [];
-    for (let i = 0; i < CFG.streams; i += 1) tasks.push(downloadStream(stopSignal, window, i * 40));
-    return tasks;
-  }
-
-  async function downloadStream(signal, window, delayMs) {
-    if (delayMs) await sleep(delayMs, signal).catch(() => {});
-    while (!signal.aborted) {
-      const res = await fetch(speedUrl(`/__speed/down?bytes=${CFG.downloadRequestBytes}&r=${cacheBuster()}`), { cache: 'no-store', signal });
+  async function downloadAmount(signal, amount, onBytes) {
+    let sent = 0;
+    while (sent < amount) {
+      const want = Math.min(amount - sent, 100 * 1024 * 1024);
+      const res = await fetch(speedUrl(`/__speed/down?bytes=${want}&r=${cacheBuster()}`), { cache: 'no-store', signal });
       if (!res.ok) throw new Error(`download failed with ${res.status}`);
       if (!res.body) {
         const buffer = await res.arrayBuffer();
-        window.bytes += buffer.byteLength;
+        sent += buffer.byteLength;
+        onBytes(buffer.byteLength);
         continue;
       }
       const reader = res.body.getReader();
@@ -336,8 +372,10 @@
         for (;;) {
           const chunk = await reader.read();
           if (chunk.done) break;
-          if (chunk.value) window.bytes += chunk.value.byteLength;
-          if (signal.aborted) break;
+          if (chunk.value) {
+            sent += chunk.value.byteLength;
+            onBytes(chunk.value.byteLength);
+          }
         }
       } finally {
         try { reader.releaseLock(); } catch { /* already released */ }
@@ -345,7 +383,7 @@
     }
   }
 
-  function uploadBuffer(bytes) {
+  function randomBuffer(bytes) {
     const buffer = new Uint8Array(bytes);
     const chunk = 65536;
     for (let offset = 0; offset < bytes; offset += chunk) {
@@ -376,6 +414,41 @@
     });
   }
 
+  async function uploadAmount(signal, amount, onBytes, streaming) {
+    if (streaming) {
+      const body = streamBody(randomBuffer(CFG.uploadChunk), amount, CFG.uploadChunk, onBytes);
+      const res = await fetch(speedUrl(`/__speed/up?r=${cacheBuster()}`), {
+        method: 'POST',
+        body,
+        duplex: 'half',
+        cache: 'no-store',
+        signal,
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      });
+      if (!res.ok) throw new Error(`upload failed with ${res.status}`);
+      await res.arrayBuffer();
+      return;
+    }
+
+    const source = randomBuffer(CFG.uploadBuffer);
+    let sent = 0;
+    while (sent < amount) {
+      const size = Math.min(source.byteLength, amount - sent);
+      const body = size === source.byteLength ? source : source.subarray(0, size);
+      const res = await fetch(speedUrl(`/__speed/up?r=${cacheBuster()}`), {
+        method: 'POST',
+        body,
+        cache: 'no-store',
+        signal,
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      });
+      if (!res.ok) throw new Error(`upload failed with ${res.status}`);
+      await res.arrayBuffer();
+      sent += size;
+      onBytes(size);
+    }
+  }
+
   /**
    * Some browsers only allow streamed request bodies over HTTP/2 (Chromium
    * answers ERR_H2_OR_QUIC_REQUIRED on HTTP/1.1), so decide once per page
@@ -397,7 +470,6 @@
     if (streamingUploads !== null) return streamingUploads;
     const protocol = negotiatedProtocol();
     if (protocol && protocol !== 'h2' && protocol !== 'h3') {
-      // HTTP/1.1 rejects streamed request bodies, so post buffers instead.
       streamingUploads = false;
       return streamingUploads;
     }
@@ -410,7 +482,6 @@
         duplex: 'half',
         cache: 'no-store',
         signal,
-        // A simple content type keeps this a CORS simple request.
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
       });
       await res.arrayBuffer();
@@ -422,65 +493,71 @@
     return streamingUploads;
   }
 
-  function startUploads(stopSignal, window, source, streaming) {
+  async function runStage(signal, direction, size, streaming, onProgress) {
+    const streams = Math.max(1, Math.min(CFG.streams, Math.ceil(size / (2 * 1024 * 1024))));
+    const slice = Math.floor(size / streams);
+    const loaded = [];
+    let bytes = 0;
+
+    const stopProbes = watchLoadedLatency(signal, loaded);
+    const started = performance.now();
     const tasks = [];
-    for (let i = 0; i < CFG.streams; i += 1) tasks.push(uploadStream(stopSignal, window, source, i * 40, streaming));
-    return tasks;
+    for (let index = 0; index < streams; index += 1) {
+      const amount = index === streams - 1 ? size - slice * (streams - 1) : slice;
+      const onBytes = (count) => {
+        bytes += count;
+        if (onProgress) onProgress(Math.min(1, bytes / size));
+      };
+      tasks.push(direction === 'down'
+        ? downloadAmount(signal, amount, onBytes)
+        : uploadAmount(signal, amount, onBytes, streaming));
+    }
+
+    try {
+      await Promise.all(tasks);
+    } finally {
+      stopProbes();
+    }
+
+    const elapsed = performance.now() - started;
+    return {
+      size,
+      bytes,
+      ms: elapsed,
+      mbps: elapsed > 0 ? (bytes * 8) / (elapsed / 1000) / 1e6 : 0,
+      loaded: median(loaded),
+    };
   }
 
-  async function uploadStream(signal, window, source, delayMs, streaming) {
-    if (delayMs) await sleep(delayMs, signal).catch(() => {});
+  async function runStages(signal, direction, streaming, onProgress, onStage) {
+    let previous = null;
+    for (let index = 0; index < CFG.stages.length; index += 1) {
+      const size = CFG.stages[index];
+      const base = index / CFG.stages.length;
+      const span = 1 / CFG.stages.length;
 
-    while (!signal.aborted) {
-      const url = speedUrl(`/__speed/up?r=${cacheBuster()}`);
-
-      if (streaming) {
-        const body = streamBody(source, CFG.uploadRequestBytes, CFG.uploadChunkBytes, (size) => { window.bytes += size; });
-        const res = await fetch(url, {
-          method: 'POST',
-          body,
-          duplex: 'half',
-          cache: 'no-store',
-          signal,
-          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        });
-        if (!res.ok) throw new Error(`upload failed with ${res.status}`);
-        await res.arrayBuffer();
-        continue;
+      if (previous && previous.mbps > 0) {
+        const projected = (size * 8) / (previous.mbps * 1e6);
+        if (projected > CFG.maxStageMs / 1000) {
+          onStage({ size, skipped: true });
+          onProgress(base + span);
+          continue;
+        }
       }
 
-      // Buffered fallback: one preallocated body per request, counted on ack.
-      const res = await fetch(url, {
-        method: 'POST',
-        body: source,
-        cache: 'no-store',
-        signal,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-      });
-      if (!res.ok) throw new Error(`upload failed with ${res.status}`);
-      await res.arrayBuffer();
-      window.bytes += source.byteLength;
+      setStatus(`${direction === 'down' ? 'Download' : 'Upload'} ${formatBytes(size)}`);
+      const result = await runStage(signal, direction, size, streaming, (fraction) => onProgress(base + span * fraction));
+      onStage(result);
+      previous = result;
+      onProgress(base + span);
     }
   }
 
-  /** Small probes fired while a load window runs, for the loaded latency. */
-  function watchLoadedLatency(signal, bucket) {
-    const stop = new AbortController();
-    (async () => {
-      while (!stop.signal.aborted && !signal.aborted) {
-        try {
-          bucket.push(await probe(stop.signal));
-        } catch (err) {
-          if (err && err.name === 'AbortError') break;
-        }
-        try {
-          await sleep(CFG.loadedProbeMs, stop.signal);
-        } catch {
-          break;
-        }
-      }
-    })();
-    return () => stop.abort();
+  function lastStage(stages) {
+    for (let index = stages.length - 1; index >= 0; index -= 1) {
+      if (!stages[index].skipped) return stages[index];
+    }
+    return null;
   }
 
   /* ------------------------------------------------------------ the run */
@@ -514,13 +591,20 @@
     }
   }
 
+  function emptyMetrics() {
+    return { down: null, up: null, lat: null, jitter: null, loss: null, loadedDown: null, loadedUp: null };
+  }
+
   function resetMetrics() {
     setMetric(el.down, null);
     setMetric(el.up, null);
     setMetric(el.lat, null);
     setMetric(el.jit, null);
     setMetric(el.loss, null);
-    renderScores({ down: null, up: null, lat: null, jitter: null, loss: null, loadedDown: null, loadedUp: null });
+    renderScores(emptyMetrics());
+    renderScale(emptyMetrics());
+    renderStages(el.stageDown, [], 'Download not measured yet');
+    renderStages(el.stageUp, [], 'Upload not measured yet');
     setProgress(0);
   }
 
@@ -537,7 +621,9 @@
     if (el.play) el.play.disabled = true;
     if (el.restart) el.restart.disabled = false;
 
-    const metrics = { down: null, up: null, lat: null, jitter: null, loss: null, loadedDown: null, loadedUp: null };
+    const metrics = emptyMetrics();
+    const downloadStages = [];
+    const uploadStages = [];
 
     try {
       phaseProgress('connect', 0.2);
@@ -557,49 +643,50 @@
       if (el.lat) {
         el.lat.title = `median of ${latency.samples} probes, lowest ${latency.min === null ? '-' : latency.min.toFixed(1)} ms`;
       }
+      renderScale(metrics);
       phaseProgress('latency', 1);
 
-      setStatus(`Measuring download (${CFG.streams} streams)`);
-      const loadedDown = [];
-      const stopDown = watchLoadedLatency(signal, loadedDown);
-      const download = await timedWindow(signal, CFG.windowMs, startDownloads, (samples, fraction) => {
-        setMetric(el.down, percentile(samples, 90), 'Mbps');
-        phaseProgress('download', fraction);
-      });
-      stopDown();
-      metrics.down = percentile(download.samples, 90);
-      metrics.loadedDown = median(loadedDown);
-      setMetric(el.down, metrics.down, 'Mbps');
-      if (el.down) {
-        el.down.title = `90th percentile of ${download.samples.length} samples, loaded latency ${metrics.loadedDown === null ? '-' : metrics.loadedDown.toFixed(1)} ms`;
-      }
-      phaseProgress('download', 1);
+      const streaming = await canStreamUploads(signal);
 
-      setStatus(`Measuring upload (${CFG.streams} streams)`);
-      const source = uploadBuffer(CFG.uploadBufferBytes);
-      const streamingUpload = await canStreamUploads(signal);
-      const loadedUp = [];
-      const stopUp = watchLoadedLatency(signal, loadedUp);
-      const upload = await timedWindow(
+      await runStages(
         signal,
-        CFG.windowMs,
-        (stopSignal, window) => startUploads(stopSignal, window, source, streamingUpload),
-        (samples, fraction) => {
-          setMetric(el.up, percentile(samples, 90), 'Mbps');
-          phaseProgress('upload', fraction);
+        'down',
+        streaming,
+        (fraction) => phaseProgress('download', fraction),
+        (stage) => {
+          downloadStages.push(stage);
+          const best = lastStage(downloadStages);
+          metrics.down = best ? best.mbps : metrics.down;
+          metrics.loadedDown = best ? best.loaded : metrics.loadedDown;
+          setMetric(el.down, metrics.down, 'Mbps');
+          if (el.down) el.down.title = `sustained rate of the largest completed transfer`;
+          renderStages(el.stageDown, downloadStages, 'Download not measured yet');
+          renderScale(metrics);
         },
       );
-      stopUp();
-      metrics.up = percentile(upload.samples, 90);
-      metrics.loadedUp = median(loadedUp);
-      setMetric(el.up, metrics.up, 'Mbps');
-      if (el.up) {
-        el.up.title = `90th percentile of ${upload.samples.length} samples, loaded latency ${metrics.loadedUp === null ? '-' : metrics.loadedUp.toFixed(1)} ms`;
-      }
+      phaseProgress('download', 1);
+
+      await runStages(
+        signal,
+        'up',
+        streaming,
+        (fraction) => phaseProgress('upload', fraction),
+        (stage) => {
+          uploadStages.push(stage);
+          const best = lastStage(uploadStages);
+          metrics.up = best ? best.mbps : metrics.up;
+          metrics.loadedUp = best ? best.loaded : metrics.loadedUp;
+          setMetric(el.up, metrics.up, 'Mbps');
+          if (el.up) el.up.title = `sustained rate of the largest completed transfer`;
+          renderStages(el.stageUp, uploadStages, 'Upload not measured yet');
+          renderScale(metrics);
+        },
+      );
       phaseProgress('upload', 1);
 
       setStatus('Finished');
       renderScores(metrics);
+      renderScale(metrics);
       setProgress(100);
     } catch (err) {
       if (err && err.name === 'AbortError') {
